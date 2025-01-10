@@ -5,27 +5,47 @@ import os
 from functools import lru_cache
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+import gc
 
 app = Flask(__name__)
 CORS(app)
 
-# Configuration du rate limiter
+# Configuration du rate limiter avec Redis
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
-    default_limits=["200 per day", "50 per hour"]
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://"  # Utilisez "redis://localhost:6379" en production
 )
 
-# Chargement des données et initialisation du recommender
+# Chargement des données avec gestion de mémoire optimisée
 print("Loading data...")
-movies_data, feature_matrix = load_data()
-recommender = MovieRecommender(movies_data, feature_matrix)
-print("Data loaded successfully!")
+try:
+    movies_data, feature_matrix = load_data()
+    # Forcer la collection des objets non utilisés
+    gc.collect()
+    print("Data loaded successfully!")
+except Exception as e:
+    print(f"Error loading data: {str(e)}")
+    raise
 
-# Cache pour la recherche
-@lru_cache(maxsize=1000)
+# Initialisation du recommender
+recommender = MovieRecommender(movies_data, feature_matrix)
+
+# Cache pour la recherche avec taille limitée
+@lru_cache(maxsize=100)
 def search_movies(query):
-    return movies_data[movies_data['title'].str.lower().str.contains(query.lower())]['title'].tolist()[:10]
+    try:
+        # Limiter les résultats pour économiser la mémoire
+        return movies_data[movies_data['title'].str.lower().str.contains(query.lower())]['title'].head(10).tolist()
+    except Exception as e:
+        print(f"Search error in cache: {str(e)}")
+        return []
+
+# Configuration de Gunicorn pour la production
+workers = int(os.getenv('GUNICORN_WORKERS', 1))
+threads = int(os.getenv('GUNICORN_THREADS', 2))
+timeout = int(os.getenv('GUNICORN_TIMEOUT', 30))
 
 @app.route('/search')
 @limiter.limit("20 per minute")

@@ -1,6 +1,7 @@
 flask
 flask-cors
 flask-limiter
+redis
 pandas
 numpy
 scikit-learn==1.5.2
