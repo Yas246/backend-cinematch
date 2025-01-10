@@ -17,70 +17,66 @@ class MovieRecommender:
         self.user_preferences = defaultdict(lambda: {'liked': set(), 'disliked': set()})
         self.genre_weights = defaultdict(lambda: 1.0)
     
-    def get_recommendations(self, movie_title, user_id, n_recommendations=5):
-        """
-        Retourne les recommandations en tenant compte des préférences de l'utilisateur
-        """
-        # Recherche du film de manière plus robuste
-        movie_mask = self.movies_data['title'].str.lower() == movie_title.lower()
-        if not movie_mask.any():
-            return "Film non trouvé dans la base de données"
+    def get_recommendations(self, movie_title, user_id):
+        try:
+            # Trouver l'index du film
+            movie_idx = self.movies_data[self.movies_data['title'] == movie_title].index[0]
+            base_similarities = self.compute_similarity(movie_idx)
+            
+            # Si l'utilisateur a des préférences, les prendre en compte
+            if user_id in self.user_profiles and len(self.user_preferences.get(user_id, {})) > 0:
+                user_profile = self.user_profiles[user_id]
+                user_similarities = self.compute_user_similarity(user_profile)
+                
+                # Combiner les similarités basées sur le film et sur l'utilisateur
+                combined_similarities = (base_similarities + user_similarities) / 2
+            else:
+                combined_similarities = base_similarities
+            
+            # Obtenir les meilleurs films
+            top_indices = combined_similarities.argsort()[-11:][::-1]
+            
+            # Exclure le film de référence
+            top_indices = top_indices[top_indices != movie_idx][:10]
+            
+            recommendations = self.movies_data.iloc[top_indices].copy()
+            recommendations['similarity_score'] = combined_similarities[top_indices]
+            
+            return recommendations
+            
+        except Exception as e:
+            print(f"Error in get_recommendations: {str(e)}")
+            return str(e)
+
+    def compute_user_similarity(self, user_profile):
+        # Calculer la similarité entre le profil utilisateur et tous les films
+        similarities = np.dot(self.feature_matrix, user_profile)
+        similarities = (similarities + 1) / 2  # Normaliser entre 0 et 1
+        return similarities
+
+    def add_feedback(self, user_id, movie_title, liked):
+        # Stocker le feedback
+        if user_id not in self.user_preferences:
+            self.user_preferences[user_id] = {}
         
-        # Obtenir l'index du film
-        movie_idx = movie_mask.idxmax()
+        # Mettre à jour les préférences avec un poids plus important
+        weight = 1.0 if liked else -1.0
+        self.user_preferences[user_id][movie_title] = weight
         
-        # Conversion en array dense pour le film de référence
-        movie_features = sparse.csr_matrix(self.feature_matrix.iloc[movie_idx]).toarray()
+        # Mettre à jour le profil utilisateur
+        movie_idx = self.movies_data[self.movies_data['title'] == movie_title].index
+        if len(movie_idx) > 0:
+            movie_features = self.feature_matrix[movie_idx[0]]
+            
+            if user_id not in self.user_profiles:
+                self.user_profiles[user_id] = np.zeros_like(movie_features)
+            
+            # Mettre à jour le profil avec les nouvelles préférences
+            self.user_profiles[user_id] = (
+                self.user_profiles[user_id] + (weight * movie_features)
+            ) / 2  # Moyenne pondérée avec le profil existant
         
-        # Calculer les similarités par lots pour économiser la mémoire
-        batch_size = 1000
-        n_samples = len(self.feature_matrix)
-        similarities = np.zeros(n_samples)
-        
-        for i in range(0, n_samples, batch_size):
-            end = min(i + batch_size, n_samples)
-            # Conversion en array dense pour le batch
-            batch = sparse.csr_matrix(self.feature_matrix.iloc[i:end]).toarray()
-            similarities[i:end] = cosine_similarity(movie_features, batch)[0]
-        
-        # Ajuster les scores en fonction des préférences utilisateur
-        adjusted_scores = self._adjust_scores(similarities, user_id)
-        
-        # Obtenir les indices des films les plus similaires
-        top_indices = np.argpartition(adjusted_scores, -n_recommendations-1)[-n_recommendations-1:]
-        top_indices = top_indices[np.argsort(adjusted_scores[top_indices])][::-1]
-        
-        # Filtrer les films déjà vus et le film actuel
-        seen_movies = self.user_preferences[user_id]['liked'] | self.user_preferences[user_id]['disliked']
-        current_movie = self.movies_data.iloc[movie_idx]['title']
-        
-        filtered_indices = []
-        for idx in top_indices:
-            movie_title = self.movies_data.iloc[idx]['title']
-            if movie_title not in seen_movies and movie_title != current_movie:
-                filtered_indices.append(idx)
-            if len(filtered_indices) >= n_recommendations:
-                break
-        
-        # Créer un DataFrame avec les films similaires
-        recommendations = pd.DataFrame({
-            'title': self.movies_data.iloc[filtered_indices]['title'],
-            'similarity_score': adjusted_scores[filtered_indices],
-            'genres': self.movies_data.iloc[filtered_indices]['genres'],
-            'rating': self.movies_data.iloc[filtered_indices]['rating'],
-            'poster_url': self.movies_data.iloc[filtered_indices]['poster_url'],
-            'summary': self.movies_data.iloc[filtered_indices]['summary']
-        })
-        
-        return recommendations
-    
-    def add_feedback(self, user_id, movie_title, liked=True):
-        if liked:
-            self.user_preferences[user_id]['liked'].add(movie_title)
-        else:
-            self.user_preferences[user_id]['disliked'].add(movie_title)
-        
-        self._update_genre_weights(user_id)
+        return True
     
     def _update_genre_weights(self, user_id):
         liked_movies = self.user_preferences[user_id]['liked']
